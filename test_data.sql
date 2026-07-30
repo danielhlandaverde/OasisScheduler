@@ -45,24 +45,24 @@ INSERT INTO shift_requests (employee_id, day_of_week, request_type) VALUES
 (0, 6, 0), (1, 6, 0), (2, 6, 0), (3, 6, 0), (4, 6, 0), --Sunday
 (5, 6, 0), (6, 6, 0), (7, 6, 0), (8, 6, 0), (9, 6, 0);
 
-INSERT INTO house_shifts (day_of_week, role_id, start_minutes, end_minutes, is_weekend_rate) VALUES 
+INSERT INTO house_shifts (day_of_week, role_id, start_minutes, end_minutes, is_weekend) VALUES 
 (0, 0, 660, 1020, FALSE), -- Monday Server 11:00 - 5:00 
 (0, 0, 660, 1020, FALSE), -- Monday Server 11:00 - 5:00
 (0, 1, 660, 1020, FALSE), -- Monday Runner 11:00 - 5:00
 (0, 1, 690, 1020, FALSE), -- Monday Runner 11:30 - 5:00
 (0, 2, 720, 1020, FALSE); -- Monday Host   12:00 - 5:00
 
-INSERT INTO historical_workloads (employee_id, week_offset, minutes_worked) VALUES
-(0, 1, 18*60), (0, 2, 14*60), (0, 3, 14*60), (0, 4, 23*60),
-(1, 1, 8*60),  (1, 2, 6*60),  (1, 3, 8*60),  (1, 4, 11*60),
-(2, 1, 18*60), (2, 2, 16*60), (2, 3, 10*60), (2, 4, 20*60),
-(3, 1, 12*60), (3, 2, 12*60), (3, 3, 14*60), (3, 4, 22*60),
-(4, 1, 27*60), (4, 2, 26*60), (4, 3, 22*60), (4, 4, 23*60),
-(5, 1, 7*60),  (5, 2, 5*60),  (5, 3, 14*60), (5, 4, 7*60),
-(6, 1, 18*60), (6, 2, 15*60), (6, 3, 18*60), (6, 4, 11*60),
-(7, 1, 18*60), (7, 2, 18*60), (7, 3, 10*60), (7, 4, 16*60),
-(8, 1, 19*60), (8, 2, 12*60), (8, 3, 20*60), (8, 4, 14*60),
-(9, 1, 29*60), (9, 2, 28*60), (9, 3, 22*60), (9, 4, 25*60);
+INSERT INTO historical_workloads (employee_id, week_offset, minutes_worked, is_absent) VALUES
+(0, 1, 18*60, FALSE), (0, 2, 0*60, TRUE), (0, 3, 14*60, FALSE), (0, 4, 23*60, FALSE),
+(1, 1, 8*60, FALSE),  (1, 2, 6*60, FALSE),  (1, 3, 8*60, FALSE),  (1, 4, 11*60, FALSE),
+(2, 1, 18*60, FALSE), (2, 2, 16*60, FALSE), (2, 3, 10*60, FALSE), (2, 4, 20*60, FALSE),
+(3, 1, 12*60, FALSE), (3, 2, 12*60, FALSE), (3, 3, 14*60, FALSE), (3, 4, 22*60, FALSE),
+(4, 1, 27*60, FALSE), (4, 2, 26*60, FALSE), (4, 3, 22*60, FALSE), (4, 4, 23*60, FALSE),
+(5, 1, 7*60, FALSE),  (5, 2, 5*60, FALSE),  (5, 3, 14*60, FALSE), (5, 4, 7*60, FALSE),
+(6, 1, 18*60, FALSE), (6, 2, 15*60, FALSE), (6, 3, 18*60, FALSE), (6, 4, 11*60, FALSE),
+(7, 1, 18*60, FALSE), (7, 2, 18*60, FALSE), (7, 3, 10*60, FALSE), (7, 4, 16*60, FALSE),
+(8, 1, 19*60, FALSE), (8, 2, 12*60, FALSE), (8, 3, 20*60, FALSE), (8, 4, 14*60, FALSE),
+(9, 1, 29*60, FALSE), (9, 2, 28*60, FALSE), (9, 3, 22*60, FALSE), (9, 4, 25*60, FALSE);
 
 UPDATE employees e
 SET historical_minutes = (

@@ -3,6 +3,8 @@ import random
 from ortools.sat.python import cp_model
 from sqlalchemy import create_engine, text
 from dotenv import load_dotenv
+from dataclasses import dataclass, field
+from typing import List, Dict
 
 load_dotenv()
 database_url = os.getenv("DATABASE_URL")
@@ -18,13 +20,7 @@ catering = 5
 cook = 6
 all_positions = [server, runner, host]
 
-num_employees = 10
-num_shifts = 3
-num_days = 7
-all_employees = range(num_employees)
-all_shifts = range(num_shifts)
-all_days = range(num_days)
-
+# Request types
 none_request = 0
 am_request = 1
 pm_request = 2
@@ -32,112 +28,136 @@ dbl_request = 3
 
 max_minutes = 40 * 60 # 40 hours (in minutes) per employee weekly
 
-employee_roles = {}
-for e in all_employees:
-    employee_roles[e] = []
+@dataclass
+class Employee:
+    id: int
+    name: str
+    target_minutes: int
+    seniority_score: int
+    historical_minutes: int
+    roles: List[int] = field(default_factory = list)
+    availability: Dict[int, int] = field(default_factory = dict)
 
-# DATA FROM THE SQL EMPLOYEES TABLE YAY
-employee_ids = []
-target_minutes = []
-seniority_scores = []
-historical_minutes = [] # 4-week rolling basis (USE A QUEUE-FIFO DELETE 1 EVERY WEEK)
+@dataclass
+class HouseShift:
+    id: int
+    day: int
+    role: int
+    start: int
+    end: int
+    is_weekend: bool
 
-# Row = Employee;   Column = Day;   Element = Shift (AM/PM/DBL)
-shift_availability = [[none_request for d in all_days] for e in all_employees]
+@dataclass
+class FinalizedSchedule:
+    shift_id: int
+    employee_id: int
+    is_published: bool = False
 
-# Each item tracks open shifts on the calender to be filled
+all_employees = []
 house_shifts = []
+employee_lookup = {} # { employee_id: employee }
+employee_history = {} # { employee_id: [ {"minutes": 1080, "absent": false}, ... ] }
+
 
 # Pulling info from database
 with engine.connect() as connection:
-    employees_table = connection.execute(text("SELECT id, target_minutes_per_week, seniority_score, historical_minutes FROM employees ORDER BY id ASC"))
-    for row in employees_table:
-        employee_ids.append(row[0])
-        target_minutes.append(int(row[1]))
-        seniority_scores.append(int(row[2]))
-        historical_minutes.append(int(row[3]))
+    employees_table = connection.execute(text("SELECT id, name, target_minutes_per_week, seniority_score, historical_minutes FROM employees ORDER BY id ASC")).mappings().all()
+    employee_roles_table = connection.execute(text("SELECT employee_id, role_id FROM employee_roles ORDER BY employee_id ASC")).mappings().all()
+    shift_requests_table = connection.execute(text("SELECT employee_id, day_of_week, request_type FROM shift_requests")).mappings().all()
+    house_shifts_table = connection.execute(text("SELECT id, day_of_week, role_id, start_minutes, end_minutes, is_weekend FROM house_shifts")).mappings().all()
+    historical_workloads_table = connection.execute(text("SELECT employee_id, week_offset, minutes_worked, is_absent FROM historical_workloads")).mappings().all()
+engine.dispose()
 
-    employee_roles_table = connection.execute(text("SELECT employee_id, role_id FROM employee_roles ORDER BY employee_id ASC"))
-    for row in employee_roles_table:
-        current_employee_id = int(row[0])
-        role_id = int(row[1])
-        employee_roles[current_employee_id].append(role_id)
+for row in employees_table:
+    e_id = row["id"]
+    employee = Employee(
+        id = e_id, 
+        name = row["name"], 
+        target_minutes = row["target_minutes_per_week"], 
+        seniority_score= row["seniority_score"], 
+        historical_minutes = row["historical_minutes"])
+    all_employees.append(employee)
+    employee_lookup[e_id] = employee
+    employee_history[e_id] = []
 
-    shift_requests_table = connection.execute(text("SELECT employee_id, day_of_week, request_type FROM shift_requests"))
-    for row in shift_requests_table:
-        current_employee_id = int(row[0])
-        day = int(row[1])
-        req_type = int(row[2])
-        shift_availability[current_employee_id][day] = req_type
+for row in employee_roles_table:
+    if row["employee_id"] in employee_lookup:
+        employee_lookup[row["employee_id"]].roles.append(row["role_id"])
 
-    house_shifts_table = connection.execute(text("SELECT id, day_of_week, role_id, start_minutes, end_minutes, is_weekend_rate FROM house_shifts"))
-    for row in house_shifts_table:
-        shift_blueprint = {
-            "id": int(row[0]),
-            "day": int(row[1]),
-            "role": int(row[2]),
-            "start": int(row[3]),
-            "end": int(row[4])
-        }
-        house_shifts.append(shift_blueprint)
+for row in shift_requests_table:
+    if row["employee_id"] in employee_lookup:
+        employee_lookup[row["employee_id"]].availability[row["day_of_week"]] = row["request_type"]
+
+for row in house_shifts_table:
+    shift = HouseShift(
+        id = row["id"],
+        day = row["day_of_week"],
+        role = row["role_id"],
+        start = row["start_minutes"],
+        end = row["end_minutes"],
+        is_weekend = row["is_weekend"])
+    house_shifts.append(shift)
+
+for row in historical_workloads_table:
+    if row["employee_id"] in employee_history:
+        employee_history[row["employee_id"]].append({
+            "minutes": int(row["minutes_worked"]),
+            "absent": bool(row["is_absent"]) })
 
 
 model = cp_model.CpModel()
 
 
-# shifts[(e, d, s)]: employee 'e' works shift 's'
+# shifts[(e, s)]: employee 'e' works shift 's'
 shifts = {}
 for e in all_employees:
     for s in house_shifts:
-        shift_id = s["id"]
-        shifts[(e, s["id"])] = model.new_bool_var(f"assign_e{e}_shift{shift_id}")
+        shifts[(e.id, s.id)] = model.new_bool_var(f"assign_e{e.id}_shift{s.id}")
 
 # Every open shift can only recieve at most one employee
 for s in house_shifts:
-    assigned_pool = []
+    assigned = []
     for e in all_employees:
-        assigned_pool.append(shifts[(e, s["id"])])
-    model.add(cp_model.LinearExpr.sum(assigned_pool) <= 1)
+        assigned.append(shifts[(e.id, s.id)])
+    model.add(cp_model.LinearExpr.sum(assigned) <= 1)
 
 # Employees can only be scheduled for qualified position(s)
 for e in all_employees:
     for s in house_shifts:
-        if s["role"] not in employee_roles[e]:
-            model.add(shifts[(e, s["id"])] == 0)
+        if s.role not in e.roles:
+            model.add(shifts[(e.id, s.id)] == 0)
 
 # Employees can only be scheduled when they request that shift
 for e in all_employees:
     for s in house_shifts:
-        shift_id = s["id"]
-        d = s["day"]
-        is_am_shift = s["start"] < 1020  # True if shift starts before 5:00 PM
+        is_am_shift = s.start < 1020  # True if shift starts before 5:00 PM
 
-        employee_request = shift_availability[e][d]
+        employee_request = e.availability.get(s.day, none_request)
         has_am_request = employee_request == am_request
         has_pm_request = employee_request == pm_request
         has_dbl_request = employee_request == dbl_request
 
         if is_am_shift and not has_am_request and not has_dbl_request:
-            model.add(shifts[(e, shift_id)] == 0)
+            model.add(shifts[(e.id, s.id)] == 0)
         elif not is_am_shift and not has_pm_request and not has_dbl_request:
-            model.add(shifts[(e, shift_id)] == 0)
+            model.add(shifts[(e.id, s.id)] == 0)
 
 # Prevents against scheduling overlapping shifts
 for e in all_employees:
     for shift1 in house_shifts:
         for shift2 in house_shifts:
-            if shift1["id"] >= shift2["id"] or shift1["day"] != shift2["day"]:
+            if shift1.id >= shift2.id or shift1.day != shift2.day:
                 continue
-            overlaps = (shift1["start"] < shift2["end"]) and (shift2["start"] < shift1["end"])
+            overlaps = (shift1.start < shift2.end) and (shift2.start < shift1.end)
             if overlaps:
-                model.add(shifts[(e, shift1["id"])] + shifts[(e, shift2["id"])] <= 1)
+                model.add(shifts[(e.id, shift1.id)] + shifts[(e.id, shift2.id)] <= 1)
 
 # Employees cannot work more than 40 hours (2400 minutes) per week
 for e in all_employees:
     mins_worked = []
     for s in house_shifts:
-        duration = s["end"] - s["start"]
-        mins_worked.append(shifts[(e, s["id"])] * duration)
+        duration = s.end - s.start
+        mins_worked.append(shifts[(e.id, s.id)] * duration)
     model.add(cp_model.LinearExpr.sum(mins_worked) <= max_minutes)
 
 # This handles workforce fairness, employee seniority, and random tie-breaking
@@ -145,24 +165,41 @@ for e in all_employees:
 # ensure the solver can rank employees cleanly
 objective_terms = []
 for e in all_employees:
-    weekly_average_mins = historical_minutes[e] / 4.0
-    fairness_gap = int(target_minutes[e] - weekly_average_mins)
-    seniority_bonus = seniority_scores[e] * 120
+    minutes_worked = 0
+    active_weeks = 0
+    for week_record in employee_history.get(e.id, []):
+        if not week_record["absent"]:
+            minutes_worked += week_record["minutes"]
+            active_weeks += 1
+    if active_weeks > 0:
+        weekly_average_mins = minutes_worked / float(active_weeks)
+    else:
+        weekly_average_mins = e.target_minutes
+
+    requested_minutes = 0
+    for d in range(7):
+        request_type = e.availability.get(d, none_request)
+        if request_type == am_request or request_type == pm_request:
+            requested_minutes += 5 * 60
+        elif request_type == dbl_request:
+            requested_minutes += 10 * 60
+
+    weekly_target = min(e.target_minutes, requested_minutes)
+    fairness_gap = int(weekly_target - weekly_average_mins)
+    seniority_bonus = e.seniority_score * 120
     noise = random.randint(0, 1200)
 
     for s in house_shifts:
-        shift_id = s["id"]
-        d = s["day"]
-        is_am_shift = s["start"] < 1020
+        is_am_shift = s.start < 1020
 
-        user_request = shift_availability[e][d]
+        user_request = e.availability.get(s.day, none_request)
         if is_am_shift:
             is_requested = (user_request == am_request) or (user_request == dbl_request)
         else:
             is_requested = (user_request == pm_request) or (user_request == dbl_request)
 
-        base_reward = 100000 * int(is_requested) * shifts[(e, s["id"])]
-        fairness_points = (fairness_gap + seniority_bonus + noise) * shifts[(e, s["id"])]
+        base_reward = 100000 * int(is_requested) * shifts[(e.id, s.id)]
+        fairness_points = (fairness_gap + seniority_bonus + noise) * shifts[(e.id, s.id)]
         objective_terms.append(base_reward + fairness_points)
 
 model.maximize(sum(objective_terms))
@@ -176,31 +213,28 @@ if status == cp_model.OPTIMAL:
 
     with engine.connect() as connection:
         connection.execute(text("TRUNCATE TABLE finalized_schedule CASCADE;"))
-        for shift in house_shifts:
-            shift_id = shift["id"]
-            role = role_names[shift["role"]]
-            day = shift["day"]
-            start = shift["start"] / 60.0
+        for s in house_shifts:
+            role = role_names[s.role]
         
             filled = False
             for e in all_employees:
-                if solver.value(shifts[(e, shift_id)]) == 1:
-                    print(f"Day {day} | Shift ID {shift_id} ({role}, Start: {start:.1f}): Assigned to Employee {e}")
-                    finalized_schedule = {"shift_id": int(shift_id), "employee_id": int(e), "is_published": False}
+                if solver.value(shifts[(e.id, s.id)]) == 1:
+                    print(f"Day {s.day} | Shift ID {s.id} ({role}, Start: {s.start / 60:.1f}): Assigned to Employee {e.id}")
+                    finalized_schedule = {"shift_id": int(s.id), "employee_id": int(e.id), "is_published": False}
                     connection.execute(text("""INSERT INTO finalized_schedule (shift_id, employee_id, is_published)
                         VALUES (:shift_id, :employee_id, :is_published)"""), finalized_schedule)
                     filled = True
                     break
             if not filled:
-                #print(f"Day {day} | Shift ID {shift_id} ({role}, Start: {start:.1f}): UNFILLED (Staff Shortage)")
-                finalized_schedule = {"shift_id": int(shift_id), "employee_id": None, "is_published": False}
+                print(f"Day {s.day} | Shift ID {s.id} ({role}, Start: {s.start / 60:.1f}): UNFILLED (Staff Shortage)")
+                finalized_schedule = {"shift_id": int(s.id), "employee_id": None, "is_published": False}
                 connection.execute(text("""INSERT INTO finalized_schedule (shift_id, employee_id, is_published)
                     VALUES (:shift_id, :employee_id, :is_published)"""), finalized_schedule)
-        connection.commit()    
+        connection.commit()
+    engine.dispose()
 else:
     print("No optimal schedule found.")
-
-engine.dispose()
+    engine.dispose()
 
 
 # FUTURE ME: to prevent score inflation from absent weeks, calculate
